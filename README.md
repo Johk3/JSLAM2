@@ -77,12 +77,4 @@ The application will open three windows:
 
 Contributions to JSLAM2 are welcome! Please feel free to submit pull requests, create issues or spread the word.
 
-## License
-
-[Insert your chosen license here]
-
-## Contact
-
-[Your Name] - [your.email@example.com]
-
 Project Link: https://github.com/johk3/JSLAM2
