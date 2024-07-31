@@ -18,8 +18,8 @@ JSLAM2 is a real-time Simultaneous Localization and Mapping (SLAM) visualization
 - C++17 compiler
 - OpenCV 4.x
 - OpenGL
-- GLEW
-- GLFW3
+- GLEW(included)
+- GLFW3(included)
 - CMake 3.28 or higher
 
 ## Project Structure
