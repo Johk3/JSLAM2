@@ -6,6 +6,9 @@
 #include <condition_variable>
 #include <queue>
 
+// Globals
+std::atomic<bool> should_exit(false);
+
 // SLAMSystem class (placeholder for actual SLAM implementation)
 class SLAMSystem {
 public:
@@ -110,6 +113,7 @@ void processVideoThread(FrameQueue& frameQueue, const std::string& videoPath, in
     cv::VideoCapture cap(videoPath);
     if (!cap.isOpened()) {
         std::cerr << "Error opening video file" << std::endl;
+        should_exit = true;
         return;
     }
 
@@ -121,13 +125,13 @@ void processVideoThread(FrameQueue& frameQueue, const std::string& videoPath, in
 
     cv::Mat frame;
     double timestamp = 0;
-    while (cap.read(frame)) {
+    while (!should_exit && cap.read(frame)) {
         frameQueue.push({frame.clone(), timestamp});
         timestamp += frameTime;
-        // Simulate real-time playback by sleeping between frames
         std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(frameTime)));
     }
 }
+
 
 int main(int argc, char** argv) {
     if (argc != 2) {
@@ -139,10 +143,10 @@ int main(int argc, char** argv) {
         std::cerr << "Failed to initialize GLFW" << std::endl;
         return -1;
     }
+
     // Get primary monitor resolution
     GLFWmonitor* primaryMonitor = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = glfwGetVideoMode(primaryMonitor);
-
     int monitorWidth = mode->width;
     int monitorHeight = mode->height;
 
@@ -165,9 +169,10 @@ int main(int argc, char** argv) {
         return -1;
     }
 
+    // Start video processing thread
     std::thread videoThread(processVideoThread, std::ref(frameQueue), argv[1], std::ref(videoWidth), std::ref(videoHeight));
 
-    // Wait for the video dimensions to be set
+    // Wait for video dimensions to be set by the video thread
     while (videoWidth == 0 || videoHeight == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -186,38 +191,57 @@ int main(int argc, char** argv) {
         actualVideoWidth = static_cast<int>(maxVideoHeight * videoAspectRatio);
     }
 
-    // Calculate video window position
+    // Calculate video window position (centered in the right half of the screen)
     int videoX = monitorWidth / 2;
-    int videoY = (monitorHeight - actualVideoHeight) / 2;  // Center vertically
+    int videoY = (monitorHeight - actualVideoHeight) / 2;
 
     // Create and position the video window
     cv::namedWindow("Video", cv::WINDOW_NORMAL);
     cv::moveWindow("Video", videoX, videoY);
     cv::resizeWindow("Video", actualVideoWidth, actualVideoHeight);
 
-    // Main loop
-    while (!glfwWindowShouldClose(renderer3d.getWindow()) && !glfwWindowShouldClose(renderer2d.getWindow())) {
+    while (!should_exit) {
+        // Check for ESC key press in both 3D and 2D windows
+        if (glfwGetKey(renderer3d.getWindow(), GLFW_KEY_ESCAPE) == GLFW_PRESS ||
+            glfwGetKey(renderer2d.getWindow(), GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+            should_exit = true;
+            break;
+            }
+
+        // Check if either window is closed
+        if (glfwWindowShouldClose(renderer3d.getWindow()) || glfwWindowShouldClose(renderer2d.getWindow())) {
+            should_exit = true;
+            break;
+        }
+
         FrameData frameData;
         if (frameQueue.pop(frameData)) {
-            // Process the frame with SLAM
             slam.processFrame(frameData.frame);
             slam.updateMap();
 
-            // Render 3D and 2D views
             renderer3d.render(slam);
             renderer2d.render(slam);
 
-            // Display the video frame
             cv::imshow("Video", frameData.frame);
-            cv::waitKey(1);
+
+            // Check for ESC key press in OpenCV window
+            if (cv::waitKey(1) == 27) {
+                should_exit = true;
+                break;
+            }
         }
 
-        glfwPollEvents();   // Process GLFW events
+        glfwPollEvents();
     }
+
+    // Signal the video thread to stop
+    should_exit = true;
 
     // Cleanup
     glfwTerminate();
-    videoThread.join();   // Wait for video processing thread to finish
+    videoThread.join();
+
+    // Ensure OpenCV windows are closed
     cv::destroyAllWindows();
 
     return 0;
