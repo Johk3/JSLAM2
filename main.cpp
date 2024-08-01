@@ -190,6 +190,8 @@ public:
     }
 
     void render(const std::vector<Eigen::Vector3d>& mapPoints, const std::vector<Eigen::Matrix4d>& cameraPoses) {
+        if (cameraPoses.empty()) return;
+
         glfwMakeContextCurrent(window);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -203,8 +205,18 @@ public:
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
+
+        // Update camera position and orientation
+        Eigen::Vector3d latestPosition = cameraPoses.back().block<3, 1>(0, 3);
+        Eigen::Vector3d latestOrientation = cameraPoses.back().block<3, 3>(0, 0) * Eigen::Vector3d(0, 0, 1);
+
+        // Position the camera slightly behind the latest position
+        cameraPosition = latestPosition - latestOrientation.normalized() * 2.0;
+        cameraFront = latestOrientation.normalized();
+        cameraUp = Eigen::Vector3d(0, 1, 0);
+
         gluLookAt(cameraPosition.x(), cameraPosition.y(), cameraPosition.z(),
-                  cameraPosition.x() + cameraFront.x(), cameraPosition.y() + cameraFront.y(), cameraPosition.z() + cameraFront.z(),
+                  latestPosition.x(), latestPosition.y(), latestPosition.z(),
                   cameraUp.x(), cameraUp.y(), cameraUp.z());
 
         // Draw map points
@@ -229,17 +241,6 @@ public:
 
     GLFWwindow* getWindow() { return window; }
 
-    void processInput() {
-        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-            cameraPosition += cameraFront * 0.1f;
-        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-            cameraPosition -= cameraFront * 0.1f;
-        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-            cameraPosition -= cameraFront.cross(cameraUp).normalized() * 0.1f;
-        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-            cameraPosition += cameraFront.cross(cameraUp).normalized() * 0.1f;
-    }
-
 private:
     GLFWwindow* window;
     Eigen::Vector3d cameraPosition;
@@ -249,7 +250,7 @@ private:
 
 class Renderer2D {
 public:
-    Renderer2D() : window(nullptr) {}
+    Renderer2D() : window(nullptr), cameraPosition(0, 0), zoom(20.0) {}
 
     bool initialize(int width, int height, int x, int y) {
         window = glfwCreateWindow(width, height, "2D View", NULL, NULL);
@@ -266,6 +267,8 @@ public:
     }
 
     void render(const std::vector<Eigen::Vector3d>& mapPoints, const std::vector<Eigen::Matrix4d>& cameraPoses) {
+        if (cameraPoses.empty()) return;
+
         glfwMakeContextCurrent(window);
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -275,7 +278,15 @@ public:
 
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
-        glOrtho(-10, 10, -10, 10, -1, 1);
+
+        // Update camera position to follow the latest pose
+        Eigen::Vector3d latestPosition = cameraPoses.back().block<3, 1>(0, 3);
+        cameraPosition = Eigen::Vector2d(latestPosition.x(), latestPosition.z());
+
+        // Set up the view to follow the camera
+        glOrtho(cameraPosition.x() - zoom, cameraPosition.x() + zoom,
+                cameraPosition.y() - zoom * height / width, cameraPosition.y() + zoom * height / width,
+                -1, 1);
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
@@ -304,6 +315,8 @@ public:
 
 private:
     GLFWwindow* window;
+    Eigen::Vector2d cameraPosition;
+    double zoom;
 };
 
 struct FrameData {
@@ -467,10 +480,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        renderer3d.processInput();  // Handle 3D camera movement
         glfwPollEvents();
     }
-
     // Signal the video thread to stop
     should_exit = true;
 
