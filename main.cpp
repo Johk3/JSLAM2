@@ -12,7 +12,9 @@
 #include <g2o/solvers/eigen/linear_solver_eigen.h>
 #include <g2o/types/sba/types_six_dof_expmap.h>
 #include <g2o/core/robust_kernel_impl.h>
-#include "core/optimization_algorithm_levenberg.h"
+#include <g2o/core/optimization_algorithm_levenberg.h>
+
+#include "g2o/core/optimization_algorithm_levenberg.h"
 #include "g2o/types/slam3d/vertex_pointxyz.h"
 
 
@@ -170,7 +172,7 @@ private:
 
 class Renderer3D {
 public:
-    Renderer3D() : window(nullptr) {}
+    Renderer3D() : window(nullptr), cameraPosition(0, 0, -5), cameraFront(0, 0, 1), cameraUp(0, 1, 0) {}
 
     bool initialize(int width, int height, int x, int y) {
         window = glfwCreateWindow(width, height, "3D View", NULL, NULL);
@@ -180,22 +182,69 @@ public:
         glfwSetWindowPos(window, x, y);
         glfwMakeContextCurrent(window);
         if (glewInit() != GLEW_OK) return false;
+
+        glEnable(GL_DEPTH_TEST);
+        glPointSize(3.0f);
+
         return true;
     }
 
-    void render(const SLAMSystem& slam) {
+    void render(const std::vector<Eigen::Vector3d>& mapPoints, const std::vector<Eigen::Matrix4d>& cameraPoses) {
         glfwMakeContextCurrent(window);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Implement 3D rendering here
+        int width, height;
+        glfwGetFramebufferSize(window, &width, &height);
+        glViewport(0, 0, width, height);
+
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        gluPerspective(45.0, (double)width / height, 0.1, 100.0);
+
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+        gluLookAt(cameraPosition.x(), cameraPosition.y(), cameraPosition.z(),
+                  cameraPosition.x() + cameraFront.x(), cameraPosition.y() + cameraFront.y(), cameraPosition.z() + cameraFront.z(),
+                  cameraUp.x(), cameraUp.y(), cameraUp.z());
+
+        // Draw map points
+        glColor3f(1.0f, 0.0f, 0.0f);
+        glBegin(GL_POINTS);
+        for (const auto& point : mapPoints) {
+            glVertex3d(point.x(), point.y(), point.z());
+        }
+        glEnd();
+
+        // Draw camera trajectory
+        glColor3f(0.0f, 1.0f, 0.0f);
+        glBegin(GL_LINE_STRIP);
+        for (const auto& pose : cameraPoses) {
+            Eigen::Vector3d position = pose.block<3, 1>(0, 3);
+            glVertex3d(position.x(), position.y(), position.z());
+        }
+        glEnd();
 
         glfwSwapBuffers(window);
     }
 
     GLFWwindow* getWindow() { return window; }
 
+    void processInput() {
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+            cameraPosition += cameraFront * 0.1f;
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+            cameraPosition -= cameraFront * 0.1f;
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+            cameraPosition -= cameraFront.cross(cameraUp).normalized() * 0.1f;
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+            cameraPosition += cameraFront.cross(cameraUp).normalized() * 0.1f;
+    }
+
 private:
     GLFWwindow* window;
+    Eigen::Vector3d cameraPosition;
+    Eigen::Vector3d cameraFront;
+    Eigen::Vector3d cameraUp;
 };
 
 class Renderer2D {
@@ -210,14 +259,43 @@ public:
         glfwSetWindowPos(window, x, y);
         glfwMakeContextCurrent(window);
         if (glewInit() != GLEW_OK) return false;
+
+        glPointSize(3.0f);
+
         return true;
     }
 
-    void render(const SLAMSystem& slam) {
+    void render(const std::vector<Eigen::Vector3d>& mapPoints, const std::vector<Eigen::Matrix4d>& cameraPoses) {
         glfwMakeContextCurrent(window);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        // Implement 2D rendering here
+        int width, height;
+        glfwGetFramebufferSize(window, &width, &height);
+        glViewport(0, 0, width, height);
+
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        glOrtho(-10, 10, -10, 10, -1, 1);
+
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+
+        // Draw map points
+        glColor3f(1.0f, 0.0f, 0.0f);
+        glBegin(GL_POINTS);
+        for (const auto& point : mapPoints) {
+            glVertex2d(point.x(), point.z());  // Use x and z for top-down view
+        }
+        glEnd();
+
+        // Draw camera trajectory
+        glColor3f(0.0f, 1.0f, 0.0f);
+        glBegin(GL_LINE_STRIP);
+        for (const auto& pose : cameraPoses) {
+            Eigen::Vector3d position = pose.block<3, 1>(0, 3);
+            glVertex2d(position.x(), position.z());  // Use x and z for top-down view
+        }
+        glEnd();
 
         glfwSwapBuffers(window);
     }
@@ -308,6 +386,7 @@ int main(int argc, char** argv) {
     FrameQueue frameQueue;
     // Initialize SLAM system with camera intrinsics
     double focal_length = 500.0;  // Replace with your camera's actual focal length
+    cv::Point2d principal_point(videoWidth / 2, videoHeight / 2);  // Assume principal point is at the center of the image
     cv::Mat K = (cv::Mat_<double>(3, 3) <<
         focal_length, 0, principal_point.x,
         0, focal_length, principal_point.y,
@@ -371,18 +450,13 @@ int main(int argc, char** argv) {
         FrameData frameData;
         if (frameQueue.pop(frameData)) {
             slam.processFrame(frameData.frame);
-            slam.updateMap();
 
             // Get the latest map points and camera poses
             const auto& mapPoints = slam.getMapPoints();
             const auto& cameraPoses = slam.getCameraPoses();
 
-
-            renderer3d.updateMap(mapPoints, cameraPoses);
-            renderer3d.render();
-
-            renderer2d.updateMap(mapPoints, cameraPoses);
-            renderer2d.render();
+            renderer3d.render(mapPoints, cameraPoses);
+            renderer2d.render(mapPoints, cameraPoses);
 
             cv::imshow("Video", frameData.frame);
 
@@ -393,6 +467,7 @@ int main(int argc, char** argv) {
             }
         }
 
+        renderer3d.processInput();  // Handle 3D camera movement
         glfwPollEvents();
     }
 
