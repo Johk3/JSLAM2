@@ -5,6 +5,16 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
+#include <opencv2/features2d.hpp>
+#include <Eigen/Dense>
+#include <g2o/core/sparse_optimizer.h>
+#include <g2o/core/block_solver.h>
+#include <g2o/solvers/eigen/linear_solver_eigen.h>
+#include <g2o/types/sba/types_six_dof_expmap.h>
+#include <g2o/core/robust_kernel_impl.h>
+#include "core/optimization_algorithm_levenberg.h"
+#include "g2o/types/slam3d/vertex_pointxyz.h"
+
 
 // Globals
 std::atomic<bool> should_exit(false);
@@ -12,11 +22,149 @@ std::atomic<bool> should_exit(false);
 // SLAMSystem class (placeholder for actual SLAM implementation)
 class SLAMSystem {
 public:
-    void processFrame(const cv::Mat& frame) {
-        // Implement SLAM algorithm here
+    SLAMSystem(const cv::Mat& K) : K_(K), orb_(cv::ORB::create(2000)) {
+        initializeOptimizer();
     }
-    void updateMap() {
-        // Update internal map representation
+
+    void processFrame(const cv::Mat& frame) {
+        if (prev_frame_.empty()) {
+            prev_frame_ = frame.clone();
+            detectAndComputeFeatures(prev_frame_, prev_keypoints_, prev_descriptors_);
+            return;
+        }
+
+        std::vector<cv::KeyPoint> curr_keypoints;
+        cv::Mat curr_descriptors;
+        detectAndComputeFeatures(frame, curr_keypoints, curr_descriptors);
+
+        std::vector<cv::DMatch> matches;
+        matchFeatures(prev_descriptors_, curr_descriptors, matches);
+
+        Eigen::Matrix4d transform = estimateMotion(prev_keypoints_, curr_keypoints, matches);
+
+        updateMap(transform, curr_keypoints, matches);
+
+        prev_frame_ = frame.clone();
+        prev_keypoints_ = curr_keypoints;
+        prev_descriptors_ = curr_descriptors;
+    }
+
+    const std::vector<Eigen::Vector3d>& getMapPoints() const {
+        return map_points_;
+    }
+
+    const std::vector<Eigen::Matrix4d>& getCameraPoses() const {
+        return camera_poses_;
+    }
+
+private:
+    cv::Mat K_;
+    cv::Ptr<cv::ORB> orb_;
+    cv::Mat prev_frame_;
+    std::vector<cv::KeyPoint> prev_keypoints_;
+    cv::Mat prev_descriptors_;
+    std::vector<Eigen::Vector3d> map_points_;
+    std::vector<Eigen::Matrix4d> camera_poses_;
+    g2o::SparseOptimizer optimizer_;
+
+    void initializeOptimizer() {
+        auto linearSolver = std::make_unique<g2o::LinearSolverEigen<g2o::BlockSolver_6_3::PoseMatrixType>>();
+        auto blockSolver = std::make_unique<g2o::BlockSolver_6_3>(std::move(linearSolver));
+        auto algorithm = new g2o::OptimizationAlgorithmLevenberg(std::move(blockSolver));
+        optimizer_.setAlgorithm(algorithm);
+    }
+
+    void detectAndComputeFeatures(const cv::Mat& frame, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors) {
+        orb_->detectAndCompute(frame, cv::noArray(), keypoints, descriptors);
+    }
+
+    void matchFeatures(const cv::Mat& desc1, const cv::Mat& desc2, std::vector<cv::DMatch>& matches) {
+        cv::BFMatcher matcher(cv::NORM_HAMMING);
+        std::vector<std::vector<cv::DMatch>> knn_matches;
+        matcher.knnMatch(desc1, desc2, knn_matches, 2);
+
+        const float ratio_thresh = 0.7f;
+        for (const auto& knn_match : knn_matches) {
+            if (knn_match[0].distance < ratio_thresh * knn_match[1].distance) {
+                matches.push_back(knn_match[0]);
+            }
+        }
+    }
+
+    Eigen::Matrix4d estimateMotion(const std::vector<cv::KeyPoint>& kp1, const std::vector<cv::KeyPoint>& kp2, const std::vector<cv::DMatch>& matches) {
+        std::vector<cv::Point2f> points1, points2;
+        for (const auto& match : matches) {
+            points1.push_back(kp1[match.queryIdx].pt);
+            points2.push_back(kp2[match.trainIdx].pt);
+        }
+
+        cv::Mat E, R, t, mask;
+        E = cv::findEssentialMat(points1, points2, K_, cv::RANSAC, 0.999, 1.0, mask);
+        cv::recoverPose(E, points1, points2, K_, R, t, mask);
+
+        Eigen::Matrix4d transform = Eigen::Matrix4d::Identity();
+        transform.block<3, 3>(0, 0) = Eigen::Map<Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(R.ptr<double>());
+        transform.block<3, 1>(0, 3) = Eigen::Map<Eigen::Matrix<double, 3, 1>>(t.ptr<double>());
+
+        return transform;
+    }
+
+    void updateMap(const Eigen::Matrix4d& transform, const std::vector<cv::KeyPoint>& keypoints, const std::vector<cv::DMatch>& matches) {
+        if (camera_poses_.empty()) {
+            camera_poses_.push_back(Eigen::Matrix4d::Identity());
+        }
+        camera_poses_.push_back(camera_poses_.back() * transform);
+
+        Eigen::Matrix4d current_pose = camera_poses_.back();
+        Eigen::Matrix3d R1 = camera_poses_[camera_poses_.size() - 2].block<3, 3>(0, 0);
+        Eigen::Vector3d t1 = camera_poses_[camera_poses_.size() - 2].block<3, 1>(0, 3);
+        Eigen::Matrix3d R2 = current_pose.block<3, 3>(0, 0);
+        Eigen::Vector3d t2 = current_pose.block<3, 1>(0, 3);
+
+        for (const auto& match : matches) {
+            cv::Point2f p1 = prev_keypoints_[match.queryIdx].pt;
+            cv::Point2f p2 = keypoints[match.trainIdx].pt;
+
+            Eigen::Vector3d p3d = triangulatePoint(R1, t1, R2, t2, p1, p2);
+            map_points_.push_back(p3d);
+
+            // Add vertex and edge to the optimizer
+            g2o::VertexPointXYZ* point = new g2o::VertexPointXYZ();
+            point->setEstimate(p3d);
+            point->setId(optimizer_.vertices().size());
+            optimizer_.addVertex(point);
+
+            g2o::EdgeProjectXYZ2UV* edge = new g2o::EdgeProjectXYZ2UV();
+            edge->setVertex(0, point);
+            edge->setMeasurement(Eigen::Vector2d(p2.x, p2.y));
+            edge->setInformation(Eigen::Matrix2d::Identity());
+            edge->setRobustKernel(new g2o::RobustKernelHuber());
+            optimizer_.addEdge(edge);
+        }
+
+        // Perform local optimization
+        optimizer_.initializeOptimization();
+        optimizer_.optimize(5);
+    }
+
+    Eigen::Vector3d triangulatePoint(const Eigen::Matrix3d& R1, const Eigen::Vector3d& t1,
+                                     const Eigen::Matrix3d& R2, const Eigen::Vector3d& t2,
+                                     const cv::Point2f& p1, const cv::Point2f& p2) {
+        Eigen::Matrix<double, 3, 4> P1, P2;
+        P1.block<3, 3>(0, 0) = R1;
+        P1.block<3, 1>(0, 3) = t1;
+        P2.block<3, 3>(0, 0) = R2;
+        P2.block<3, 1>(0, 3) = t2;
+
+        Eigen::Matrix4d A;
+        A.row(0) = p1.x * P1.row(2) - P1.row(0);
+        A.row(1) = p1.y * P1.row(2) - P1.row(1);
+        A.row(2) = p2.x * P2.row(2) - P2.row(0);
+        A.row(3) = p2.y * P2.row(2) - P2.row(1);
+
+        Eigen::JacobiSVD<Eigen::Matrix4d> svd(A, Eigen::ComputeFullV);
+        Eigen::Vector4d point_homogeneous = svd.matrixV().col(3);
+        return point_homogeneous.head<3>() / point_homogeneous(3);
     }
 };
 
@@ -158,7 +306,13 @@ int main(int argc, char** argv) {
 
     int videoWidth = 0, videoHeight = 0;
     FrameQueue frameQueue;
-    SLAMSystem slam;
+    // Initialize SLAM system with camera intrinsics
+    double focal_length = 500.0;  // Replace with your camera's actual focal length
+    cv::Mat K = (cv::Mat_<double>(3, 3) <<
+        focal_length, 0, principal_point.x,
+        0, focal_length, principal_point.y,
+        0, 0, 1);
+    SLAMSystem slam(K);
     Renderer3D renderer3d;
     Renderer2D renderer2d;
 
@@ -219,8 +373,16 @@ int main(int argc, char** argv) {
             slam.processFrame(frameData.frame);
             slam.updateMap();
 
-            renderer3d.render(slam);
-            renderer2d.render(slam);
+            // Get the latest map points and camera poses
+            const auto& mapPoints = slam.getMapPoints();
+            const auto& cameraPoses = slam.getCameraPoses();
+
+
+            renderer3d.updateMap(mapPoints, cameraPoses);
+            renderer3d.render();
+
+            renderer2d.updateMap(mapPoints, cameraPoses);
+            renderer2d.render();
 
             cv::imshow("Video", frameData.frame);
 
