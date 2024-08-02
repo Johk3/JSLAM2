@@ -13,9 +13,9 @@
 #include <g2o/types/sba/types_six_dof_expmap.h>
 #include <g2o/core/robust_kernel_impl.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
-
 #include "g2o/core/optimization_algorithm_levenberg.h"
 #include "g2o/types/slam3d/vertex_pointxyz.h"
+#define M_PI 3.14159265358979323846
 
 
 // Globals
@@ -172,7 +172,9 @@ private:
 
 class Renderer3D {
 public:
-    Renderer3D() : window(nullptr), cameraPosition(0, 0, -5), cameraFront(0, 0, 1), cameraUp(0, 1, 0) {}
+    Renderer3D() : window(nullptr), cameraPosition(0, 0, -5), cameraFront(0, 0, 1), cameraUp(0, 1, 0),
+                   yaw(-90.0f), pitch(0.0f), lastX(0), lastY(0), firstMouse(true),
+                   moveSpeed(0.05f), mouseSensitivity(0.1f) {}
 
     bool initialize(int width, int height, int x, int y) {
         window = glfwCreateWindow(width, height, "3D View", NULL, NULL);
@@ -186,10 +188,14 @@ public:
         glEnable(GL_DEPTH_TEST);
         glPointSize(3.0f);
 
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        glfwSetWindowUserPointer(window, this);
+        glfwSetCursorPosCallback(window, mouse_callback_static);
+        glfwSetScrollCallback(window, scroll_callback_static);
         return true;
     }
 
-    void render(const std::vector<Eigen::Vector3d>& mapPoints, const std::vector<Eigen::Matrix4d>& cameraPoses) {
+    void render(const std::vector<Eigen::Vector3d>& mapPoints, const std::vector<Eigen::Matrix4d>& cameraPoses, bool isPaused, int currentPoseIndex) {
         if (cameraPoses.empty()) return;
 
         glfwMakeContextCurrent(window);
@@ -206,17 +212,24 @@ public:
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
 
-        // Update camera position and orientation
-        Eigen::Vector3d latestPosition = cameraPoses.back().block<3, 1>(0, 3);
-        Eigen::Vector3d latestOrientation = cameraPoses.back().block<3, 3>(0, 0) * Eigen::Vector3d(0, 0, 1);
+        if (!isPaused) {
+            // Update camera position and orientation based on the latest pose
+            Eigen::Vector3d latestPosition = cameraPoses.back().block<3, 1>(0, 3);
+            Eigen::Vector3d latestOrientation = cameraPoses.back().block<3, 3>(0, 0) * Eigen::Vector3d(0, 0, 1);
 
-        // Position the camera slightly behind the latest position
-        cameraPosition = latestPosition - latestOrientation.normalized() * 2.0;
-        cameraFront = latestOrientation.normalized();
-        cameraUp = Eigen::Vector3d(0, 1, 0);
+            cameraPosition = latestPosition - latestOrientation.normalized() * 2.0;
+            cameraFront = latestOrientation.normalized();
+            cameraUp = Eigen::Vector3d(0, 1, 0);
+        } else {
+            // Use the current camera position and orientation
+            cameraFront.x() = cos(yaw * M_PI / 180.0) * cos(pitch * M_PI / 180.0);
+            cameraFront.y() = sin(pitch * M_PI / 180.0);
+            cameraFront.z() = sin(yaw * M_PI / 180.0) * cos(pitch * M_PI / 180.0);
+            cameraFront.normalize();
+        }
 
         gluLookAt(cameraPosition.x(), cameraPosition.y(), cameraPosition.z(),
-                  latestPosition.x(), latestPosition.y(), latestPosition.z(),
+                  cameraPosition.x() + cameraFront.x(), cameraPosition.y() + cameraFront.y(), cameraPosition.z() + cameraFront.z(),
                   cameraUp.x(), cameraUp.y(), cameraUp.z());
 
         // Draw map points
@@ -236,21 +249,110 @@ public:
         }
         glEnd();
 
+        // Draw current position
+        glColor3f(0.0f, 0.0f, 1.0f);
+        glPointSize(10.0f);
+        glBegin(GL_POINTS);
+        Eigen::Vector3d currentPosition = cameraPoses[currentPoseIndex].block<3, 1>(0, 3);
+        glVertex3d(currentPosition.x(), currentPosition.y(), currentPosition.z());
+        glEnd();
+        glPointSize(3.0f);
+
         glfwSwapBuffers(window);
     }
 
     GLFWwindow* getWindow() { return window; }
+
+    void processInput(GLFWwindow* window, bool isPaused, int& currentPoseIndex, const std::vector<Eigen::Matrix4d>& cameraPoses) {
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+            if (isPaused) {
+                cameraPosition += moveSpeed * cameraFront;
+            } else {
+                currentPoseIndex = std::min(currentPoseIndex + 1, static_cast<int>(cameraPoses.size()) - 1);
+            }
+        }
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+            if (isPaused) {
+                cameraPosition -= moveSpeed * cameraFront;
+            } else {
+                currentPoseIndex = std::max(currentPoseIndex - 1, 0);
+            }
+        }
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
+            Eigen::Vector3d right = cameraFront.cross(cameraUp).normalized();
+            cameraPosition -= right * moveSpeed;
+        }
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
+            Eigen::Vector3d right = cameraFront.cross(cameraUp).normalized();
+            cameraPosition += right * moveSpeed;
+        }
+    }
 
 private:
     GLFWwindow* window;
     Eigen::Vector3d cameraPosition;
     Eigen::Vector3d cameraFront;
     Eigen::Vector3d cameraUp;
+    float yaw, pitch;
+    float lastX, lastY;
+    bool firstMouse;
+    float moveSpeed;
+    float mouseSensitivity;
+
+    static void mouse_callback_static(GLFWwindow* window, double xpos, double ypos) {
+        Renderer3D* renderer = static_cast<Renderer3D*>(glfwGetWindowUserPointer(window));
+        renderer->mouse_callback(xpos, ypos);
+    }
+
+    void mouse_callback(double xpos, double ypos) {
+        if (firstMouse) {
+            lastX = xpos;
+            lastY = ypos;
+            firstMouse = false;
+        }
+
+        float xoffset = xpos - lastX;
+        float yoffset = lastY - ypos;
+        lastX = xpos;
+        lastY = ypos;
+
+        xoffset *= mouseSensitivity;
+        yoffset *= mouseSensitivity;
+
+        yaw += xoffset;
+        pitch += yoffset;
+
+        if (pitch > 89.0f) pitch = 89.0f;
+        if (pitch < -89.0f) pitch = -89.0f;
+
+        updateCameraVectors();
+    }
+
+    static void scroll_callback_static(GLFWwindow* window, double xoffset, double yoffset) {
+        Renderer3D* renderer = static_cast<Renderer3D*>(glfwGetWindowUserPointer(window));
+        renderer->scroll_callback(xoffset, yoffset);
+    }
+
+    void scroll_callback(double xoffset, double yoffset) {
+        moveSpeed += static_cast<float>(yoffset) * 0.01f;
+        if (moveSpeed < 0.01f) moveSpeed = 0.01f;
+        if (moveSpeed > 1.0f) moveSpeed = 1.0f;
+    }
+
+    void updateCameraVectors() {
+        Eigen::Vector3d front;
+        front.x() = cos(yaw * M_PI / 180.0) * cos(pitch * M_PI / 180.0);
+        front.y() = sin(pitch * M_PI / 180.0);
+        front.z() = sin(yaw * M_PI / 180.0) * cos(pitch * M_PI / 180.0);
+        cameraFront = front.normalized();
+    }
 };
+
+
 
 class Renderer2D {
 public:
-    Renderer2D() : window(nullptr), cameraPosition(0, 0), zoom(20.0) {}
+    Renderer2D() : window(nullptr), cameraPosition(0, 0), zoom(20.0), moveSpeed(0.5f) {}
 
     bool initialize(int width, int height, int x, int y) {
         window = glfwCreateWindow(width, height, "2D View", NULL, NULL);
@@ -262,11 +364,12 @@ public:
         if (glewInit() != GLEW_OK) return false;
 
         glPointSize(3.0f);
-
+        glfwSetWindowUserPointer(window, this);
+        glfwSetScrollCallback(window, scroll_callback_static);
         return true;
     }
 
-    void render(const std::vector<Eigen::Vector3d>& mapPoints, const std::vector<Eigen::Matrix4d>& cameraPoses) {
+    void render(const std::vector<Eigen::Vector3d>& mapPoints, const std::vector<Eigen::Matrix4d>& cameraPoses, bool isPaused, int currentPoseIndex) {
         if (cameraPoses.empty()) return;
 
         glfwMakeContextCurrent(window);
@@ -279,9 +382,11 @@ public:
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
 
-        // Update camera position to follow the latest pose
-        Eigen::Vector3d latestPosition = cameraPoses.back().block<3, 1>(0, 3);
-        cameraPosition = Eigen::Vector2d(latestPosition.x(), latestPosition.z());
+        if (!isPaused) {
+            // Update camera position to follow the latest pose
+            Eigen::Vector3d latestPosition = cameraPoses.back().block<3, 1>(0, 3);
+            cameraPosition = Eigen::Vector2d(latestPosition.x(), latestPosition.z());
+        }
 
         // Set up the view to follow the camera
         glOrtho(cameraPosition.x() - zoom, cameraPosition.x() + zoom,
@@ -308,16 +413,59 @@ public:
         }
         glEnd();
 
+        // Draw current position
+        glColor3f(0.0f, 0.0f, 1.0f);
+        glPointSize(10.0f);
+        glBegin(GL_POINTS);
+        Eigen::Vector3d currentPosition = cameraPoses[currentPoseIndex].block<3, 1>(0, 3);
+        glVertex2d(currentPosition.x(), currentPosition.z());
+        glEnd();
+        glPointSize(3.0f);
+
         glfwSwapBuffers(window);
     }
 
     GLFWwindow* getWindow() { return window; }
 
+    void processInput(GLFWwindow* window, bool isPaused, int& currentPoseIndex, const std::vector<Eigen::Matrix4d>& cameraPoses) {
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+            if (isPaused) {
+                cameraPosition.y() -= moveSpeed;
+            } else {
+                currentPoseIndex = std::min(currentPoseIndex + 1, static_cast<int>(cameraPoses.size()) - 1);
+            }
+        }
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+            if (isPaused) {
+                cameraPosition.y() += moveSpeed;
+            } else {
+                currentPoseIndex = std::max(currentPoseIndex - 1, 0);
+            }
+        }
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+            cameraPosition.x() -= moveSpeed;
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+            cameraPosition.x() += moveSpeed;
+    }
+
 private:
     GLFWwindow* window;
     Eigen::Vector2d cameraPosition;
     double zoom;
+    float moveSpeed;
+
+    static void scroll_callback_static(GLFWwindow* window, double xoffset, double yoffset) {
+        Renderer2D* renderer = static_cast<Renderer2D*>(glfwGetWindowUserPointer(window));
+        renderer->scroll_callback(xoffset, yoffset);
+    }
+
+    void scroll_callback(double xoffset, double yoffset) {
+        zoom -= yoffset;
+        if (zoom < 1.0) zoom = 1.0;
+        if (zoom > 100.0) zoom = 100.0;
+    }
 };
+
 
 struct FrameData {
     cv::Mat frame;
@@ -421,6 +569,7 @@ int main(int argc, char** argv) {
     // Wait for video dimensions to be set by the video thread
     while (videoWidth == 0 || videoHeight == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     // Calculate video window size while maintaining aspect ratio
@@ -446,13 +595,29 @@ int main(int argc, char** argv) {
     cv::moveWindow("Video", videoX, videoY);
     cv::resizeWindow("Video", actualVideoWidth, actualVideoHeight);
 
+    bool isPaused = false;
+    int currentPoseIndex = 0;
+    bool wasKeyPressed = false;
+
     while (!should_exit) {
         // Check for ESC key press in both 3D and 2D windows
         if (glfwGetKey(renderer3d.getWindow(), GLFW_KEY_ESCAPE) == GLFW_PRESS ||
             glfwGetKey(renderer2d.getWindow(), GLFW_KEY_ESCAPE) == GLFW_PRESS) {
             should_exit = true;
             break;
+        }
+
+        // Check for 'P' key press to toggle pause
+        if (glfwGetKey(renderer3d.getWindow(), GLFW_KEY_P) == GLFW_PRESS ||
+            glfwGetKey(renderer2d.getWindow(), GLFW_KEY_P) == GLFW_PRESS) {
+            if (!wasKeyPressed) {
+                isPaused = !isPaused;
+                wasKeyPressed = true;
+                std::cout << (isPaused ? "Paused" : "Resumed") << std::endl;
             }
+        } else {
+            wasKeyPressed = false;
+        }
 
         // Check if either window is closed
         if (glfwWindowShouldClose(renderer3d.getWindow()) || glfwWindowShouldClose(renderer2d.getWindow())) {
@@ -460,24 +625,36 @@ int main(int argc, char** argv) {
             break;
         }
 
-        FrameData frameData;
-        if (frameQueue.pop(frameData)) {
-            slam.processFrame(frameData.frame);
+        // Get the latest map points and camera poses
+        const auto& mapPoints = slam.getMapPoints();
+        const auto& cameraPoses = slam.getCameraPoses();
 
-            // Get the latest map points and camera poses
-            const auto& mapPoints = slam.getMapPoints();
-            const auto& cameraPoses = slam.getCameraPoses();
+        // Process input for both renderers
+        renderer3d.processInput(renderer3d.getWindow(), isPaused, currentPoseIndex, cameraPoses);
+        renderer2d.processInput(renderer2d.getWindow(), isPaused, currentPoseIndex, cameraPoses);
 
-            renderer3d.render(mapPoints, cameraPoses);
-            renderer2d.render(mapPoints, cameraPoses);
-
-            cv::imshow("Video", frameData.frame);
-
-            // Check for ESC key press in OpenCV window
-            if (cv::waitKey(1) == 27) {
-                should_exit = true;
-                break;
+        // Update SLAM and video playback when not paused
+        if (!isPaused) {
+            FrameData frameData;
+            if (frameQueue.pop(frameData)) {
+                slam.processFrame(frameData.frame);
+                currentPoseIndex = cameraPoses.size() - 1;
+                cv::imshow("Video", frameData.frame);
             }
+        }
+
+        // Render both views
+        renderer3d.render(mapPoints, cameraPoses, isPaused, currentPoseIndex);
+        renderer2d.render(mapPoints, cameraPoses, isPaused, currentPoseIndex);
+
+        // Check for ESC key press in OpenCV window
+        int key = cv::waitKey(1);
+        if (key == 27) {  // ESC key
+            should_exit = true;
+            break;
+        } else if (key == 'p' || key == 'P') {
+            isPaused = !isPaused;
+            std::cout << (isPaused ? "Paused" : "Resumed") << std::endl;
         }
 
         glfwPollEvents();
