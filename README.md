@@ -12,6 +12,9 @@ JSLAM2 is a real-time Simultaneous Localization and Mapping (SLAM) visualization
 - Original video playback
 - Multi-threaded design for efficient performance
 - Aspect ratio preservation for video display
+- Pause and resume functionality
+- Interactive navigation through the camera trajectory
+
 
 ## Requirements
 
@@ -21,6 +24,8 @@ JSLAM2 is a real-time Simultaneous Localization and Mapping (SLAM) visualization
 - GLEW(included)
 - GLFW3(included)
 - CMake 3.28 or higher
+- Eigen3
+- g2o
 
 ## Project Structure
 
@@ -71,7 +76,14 @@ The application will open three windows:
 ## Controls
 
 - ESC: Close the application
-- The application automatically adjusts window sizes to fit your monitor
+- P: Pause/Resume the video and SLAM processing
+### When paused:
+- W: Move forward along the trajectory
+- S: Move backward along the trajectory
+- A: Pan left (2D view) / Strafe left (3D view)
+- D: Pan right (2D view) / Strafe right (3D view)
+- Mouse movement (3D view): Rotate camera
+- Scroll wheel: Zoom in/out (2D view) / Adjust movement speed (3D view)
 
 ## Contributing
 
