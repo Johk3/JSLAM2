@@ -32,6 +32,7 @@ public:
         if (prev_frame_.empty()) {
             prev_frame_ = frame.clone();
             detectAndComputeFeatures(prev_frame_, prev_keypoints_, prev_descriptors_);
+            current_keypoints_ = prev_keypoints_; // Store current keypoints
             return;
         }
 
@@ -49,6 +50,11 @@ public:
         prev_frame_ = frame.clone();
         prev_keypoints_ = curr_keypoints;
         prev_descriptors_ = curr_descriptors;
+        current_keypoints_ = curr_keypoints; // Store current keypoints
+    }
+
+    const std::vector<cv::KeyPoint>& getCurrentKeypoints() const {
+        return current_keypoints_;
     }
 
     const std::vector<Eigen::Vector3d>& getMapPoints() const {
@@ -68,6 +74,7 @@ private:
     std::vector<Eigen::Vector3d> map_points_;
     std::vector<Eigen::Matrix4d> camera_poses_;
     g2o::SparseOptimizer optimizer_;
+    std::vector<cv::KeyPoint> current_keypoints_;
 
     void initializeOptimizer() {
         auto linearSolver = std::make_unique<g2o::LinearSolverEigen<g2o::BlockSolver_6_3::PoseMatrixType>>();
@@ -639,9 +646,21 @@ int main(int argc, char** argv) {
             if (frameQueue.pop(frameData)) {
                 slam.processFrame(frameData.frame);
                 currentPoseIndex = cameraPoses.size() - 1;
-                cv::imshow("Video", frameData.frame);
+
+                // Draw tracked points on the frame
+                cv::Mat displayFrame = frameData.frame.clone();
+                const auto& currentKeypoints = slam.getCurrentKeypoints();
+                for (const auto& kp : currentKeypoints) {
+                    cv::rectangle(displayFrame,
+                                  cv::Point(kp.pt.x - 2, kp.pt.y - 2),
+                                  cv::Point(kp.pt.x + 2, kp.pt.y + 2),
+                                  cv::Scalar(0, 0, 255), 2);
+                }
+
+                cv::imshow("Video", displayFrame);
             }
         }
+
 
         // Render both views
         renderer3d.render(mapPoints, cameraPoses, isPaused, currentPoseIndex);
